@@ -21,9 +21,7 @@ Cada candidato tem uma pasta com `lattes.xml` e os PDFs comprobatórios nomeados
 | 10 | Projetos de pesquisa |
 | 11 | Projetos de extensão |
 | 13 | Organização de evento científico |
-| 14 | Iniciação Científica (participação) |
-| 15 | Banca de especialização |
-| 16 / 17 / 18 | Produção artística — Internacional / Nacional / Regional-Local |
+
 
 Seção 3 (livro publicado, isolado de organizado) e 12 (projeto de ensino) existem na numeração do Anexo II mas **não têm pasta/prefixo de PDF próprio** — a primeira porque se resolve por reclassificação de conteúdo dentro do prefixo 4 (acima), a segunda porque o sistema não extrai essa categoria do Lattes (não é um bug: categoria não implementada).
 
