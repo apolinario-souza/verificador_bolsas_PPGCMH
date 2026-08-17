@@ -90,6 +90,7 @@ def similaridade(a: str, b: str) -> float:
 _STOP_INSTITUICAO = {
     "universidade", "faculdade", "instituto", "centro", "escola", "colegio", "colégio",
     "fundacao", "fundação", "sociedade", "associacao", "associação", "unidade",
+    "prefeitura", "camara", "câmara",
     "federal", "estadual", "municipal", "particular", "publica", "pública", "privada",
     "ensino", "superior", "tecnologico", "tecnológico", "universitario", "universitário",
     "educacao", "educação", "ciencias", "ciências",
@@ -163,15 +164,12 @@ _SECAO_TIPOS = {
     "9":  ["projeto_pesquisa"],
     "10": ["projeto_extensao"],
     "13": ["organizacao_evento"],
-    "14": ["ic_manual"],
-    "16": ["prod_artistica_int", "prod_artistica_nac", "prod_artistica_reg"],
 }
 
 # Tipos cuja subcategoria de pontuação é sempre fixa ("unidade") — a própria
-# seção/tipo já resolve o nível (ex.: prod_artistica_int já é "internacional").
+# seção/tipo já resolve o nível.
 _TIPOS_UNIDADE_FIXA = frozenset({
-    "prod_artistica_int", "prod_artistica_nac", "prod_artistica_reg",
-    "organizacao_evento", "ic_manual",
+    "organizacao_evento",
 })
 
 # Tipos que podem ser pontuados de forma flat ("por unidade") OU, se a
@@ -201,11 +199,7 @@ _TIPO_KEYWORDS = [
     ("orientacao_ic",       (r"orienta", r"iniciacao cientifica")),
     ("orientacao_esp",      (r"orienta", r"especializac|aperfeicoamento")),
     ("orientacao_tcc",      (r"orienta", r"\btcc\b|graduacao|conclusao de curso")),
-    ("ic_manual",           (r"iniciacao cientifica",)),
     ("banca",               (r"\bbanca",)),
-    ("prod_artistica_int",  (r"producao artistica", r"internacional")),
-    ("prod_artistica_nac",  (r"producao artistica", r"\bnacional\b")),
-    ("prod_artistica_reg",  (r"producao artistica", r"regional|\blocal\b")),
     ("livro_organizado",    (r"\blivro", r"organiz|edic")),
     ("livro_publicado",     (r"\blivro", r"public")),
     ("capitulo",            (r"capitulo",)),
@@ -400,10 +394,6 @@ def _criterios_padrao() -> dict:
         "projeto_pesquisa": {"coordenador": 20, "integrante": 5},
         "projeto_extensao": {"coordenador": 20, "integrante": 5},
         "organizacao_evento": {"unidade": 20},
-        "ic_manual":          {"unidade": 20},
-        "prod_artistica_int": {"unidade": 60},
-        "prod_artistica_nac": {"unidade": 40},
-        "prod_artistica_reg": {"unidade": 20},
     }
 
 
@@ -430,10 +420,6 @@ def _campos_config_padrao() -> dict:
         },
 
         "organizacao_evento": {"unidade": ["titulo", "evento"]},
-        "ic_manual":         {"unidade": ["apenas_pdf"]},
-        "prod_artistica_int": {"unidade": ["titulo"]},
-        "prod_artistica_nac": {"unidade": ["titulo"]},
-        "prod_artistica_reg": {"unidade": ["titulo"]},
         "projeto_pesquisa":  {"coordenador": ["titulo", "autor"]},
         "projeto_extensao":  {"coordenador": ["titulo", "autor"]},
     }
@@ -830,107 +816,6 @@ def extrair_projetos(root: ET.Element, nome_pesquisador: str) -> tuple[list, lis
     return pesquisa, extensao
 
 
-
-def _scan_pdfs_manuais(pasta: Path, sec: int, titulo: str) -> list[dict]:
-    """Escaneia PDFs nomeados como {sec}.N.pdf na pasta do candidato."""
-    encontrados = {}
-    for pdf in list(pasta.glob(f"{sec}.*.pdf")) + list(pasta.glob(f"{sec}.*.PDF")):
-        seq = pdf.stem
-        if seq.split(".")[0] == str(sec):
-            encontrados.setdefault(seq, pdf)
-    return [{"seq": s, "titulo": titulo, "ano": "", "_pdf_path": p}
-            for s, p in sorted(encontrados.items())]
-
-
-_TIPOS_PROD_ARTISTICA = [
-    ("ARTES-VISUAIS",
-     "DADOS-BASICOS-DE-ARTES-VISUAIS",
-     "DETALHAMENTO-DE-ARTES-VISUAIS"),
-    ("MUSICA",
-     "DADOS-BASICOS-DE-MUSICA",
-     "DETALHAMENTO-DE-MUSICA"),
-    ("TEATRO",
-     "DADOS-BASICOS-DE-TEATRO",
-     "DETALHAMENTO-DE-TEATRO"),
-    ("DANCA",
-     "DADOS-BASICOS-DE-DANCA",
-     "DETALHAMENTO-DE-DANCA"),
-    ("AUDIOVISUAL",
-     "DADOS-BASICOS-DO-AUDIOVISUAL",
-     "DETALHAMENTO-DO-AUDIOVISUAL"),
-    ("DESIGN",
-     "DADOS-BASICOS-DE-DESIGN",
-     "DETALHAMENTO-DE-DESIGN"),
-    ("OUTRA-PRODUCAO-ARTISTICA-E-CULTURAL",
-     "DADOS-BASICOS-DE-OUTRA-PRODUCAO-ARTISTICA-E-CULTURAL",
-     "DETALHAMENTO-DE-OUTRA-PRODUCAO-ARTISTICA-E-CULTURAL"),
-]
-
-
-def _nivel_artistica(db: ET.Element | None, det: ET.Element | None) -> tuple[str, str, int]:
-    """Classifica produção artística em Internacional/Nacional/Regional via FLAG-RELEVANCIA."""
-    for el in (db, det):
-        if el is None:
-            continue
-        flag = el.get("FLAG-RELEVANCIA", "").upper()
-        if "INTERN" in flag:
-            return "Internacional", "prod_artistica_int", 16
-        if "NACION" in flag:
-            return "Nacional", "prod_artistica_nac", 17
-        if "REGION" in flag or "LOCAL" in flag:
-            return "Regional/Local", "prod_artistica_reg", 18
-    # fallback por país de publicação
-    pais = (db.get("PAIS", "") if db is not None else "").upper()
-    if pais and pais not in ("BRASIL", "BRAZIL", "BR", ""):
-        return "Internacional", "prod_artistica_int", 16
-    return "Nacional", "prod_artistica_nac", 17
-
-
-def extrair_prod_artistica_xml(root: ET.Element) -> tuple[list, list, list]:
-    """Extrai produções artísticas/culturais do XML Lattes e classifica por nível."""
-    internacionais, nacionais, regionais = [], [], []
-    cnt = {16: 0, 17: 0, 18: 0}
-
-    for tipo_tag, tag_db, tag_det in _TIPOS_PROD_ARTISTICA:
-        for el in root.findall(f".//{tipo_tag}"):
-            db  = el.find(tag_db)
-            det = el.find(tag_det)
-            titulo = (db.get("TITULO", "") if db is not None else "")
-            ano    = (db.get("ANO", "")    if db is not None else "")
-            if not titulo:
-                continue
-            nivel, _, secao = _nivel_artistica(db, det)
-            cnt[secao] += 1
-            item = {
-                "seq":       f"{secao}.{cnt[secao]}",
-                "titulo":    titulo,
-                "ano":       ano,
-                "tipo_arte": tipo_tag.replace("-", " ").title(),
-                "nivel":     nivel,
-            }
-            if secao == 16:
-                internacionais.append(item)
-            elif secao == 17:
-                nacionais.append(item)
-            else:
-                regionais.append(item)
-
-    return internacionais, nacionais, regionais
-
-
-def extrair_ic_manual(pasta_candidato: Path) -> list[dict]:
-    """Gera itens de IC escaneando PDFs 14.N.pdf na pasta do candidato (sem XML)."""
-    return _scan_pdfs_manuais(pasta_candidato, 14, "Iniciação Científica")
-
-
-def extrair_banca_especializacao_manual(pasta_candidato: Path) -> list[dict]:
-    """Gera itens de banca de especialização escaneando PDFs 15.N.pdf na pasta
-    do candidato. O Lattes não tem uma tag própria para essa participação
-    (só Graduação/Mestrado/Doutorado), então — como a IC — é aprovada apenas
-    pela presença do PDF, sem cruzamento com o XML."""
-    return _scan_pdfs_manuais(pasta_candidato, 15, "Banca de Especialização")
-
-
 def extrair_organizacoes_evento(root: ET.Element) -> list[dict]:
     items = []
     for i, el in enumerate(root.findall(".//ORGANIZACAO-DE-EVENTO"), 1):
@@ -1211,7 +1096,9 @@ def extrair_atuacao_profissional(root: ET.Element, pontos_atuacao: dict) -> list
                 "instituicao_codigo": codigo,
                 "descricao":   descricao,
                 "periodo":     f"{periodo_ini} – {periodo_fim}",
+                "mes_inicio":  mes_ini,
                 "ano_inicio":  ano_ini,
+                "mes_fim":     mes_fim,
                 "ano_fim":     ano_fim,
                 "categoria":   categoria,
                 "meses":       meses,
@@ -1346,6 +1233,58 @@ def _agrupar_atuacao_por_instituicao(atuacoes_xml: list[dict]) -> list[dict]:
     return [grupos[k] for k in ordem]
 
 
+def _intervalo_grupo(grupo: dict) -> tuple[date, date] | None:
+    """Menor início e maior fim entre os vínculos do Lattes de um grupo
+    (mesma instituição), como datas de dia 1 do mês — aproximação
+    suficiente pra comparar com o período do PDF (ver
+    _datas_proximas). Vínculo sem fim declarado (ANO-FIM vazio, ainda em
+    andamento) usa hoje como fim, igual a calcular_meses/_periodo_do_pdf."""
+    inicios, fins = [], []
+    hoje = date.today()
+    for it in grupo["itens"]:
+        try:
+            ai = int(it.get("ano_inicio") or 0)
+            if not ai:
+                continue
+            mi = int(it.get("mes_inicio") or 1)
+            inicios.append(date(ai, mi, 1))
+        except ValueError:
+            continue
+        try:
+            af = int(it.get("ano_fim") or 0)
+            mf = int(it.get("mes_fim") or 12)
+            fins.append(date(af, mf, 1) if af else hoje)
+        except ValueError:
+            fins.append(hoje)
+    if not inicios or not fins:
+        return None
+    return min(inicios), max(fins)
+
+
+# Diferença de data ainda considerada "bateu, com folga pra imprecisão de
+# memória/digitação no Lattes" — ver _datas_proximas.
+TOLERANCIA_DATA_DIAS = 31
+
+# Piso de similaridade de instituição pro caminho combinado com data (ver
+# _verificar_atuacao_instituicao): exige pelo menos uma palavra distintiva
+# real em comum — nunca libera por data sozinha (sim_inst 0% nunca passa
+# aqui, por maior tolerância de data que se dê).
+LIMIAR_INSTITUICAO_DATA_APERTADA = 0.40
+
+
+def _datas_proximas(periodo_pdf: tuple[date, date] | None,
+                     periodo_grupo: tuple[date, date] | None,
+                     tolerancia_dias: int = TOLERANCIA_DATA_DIAS) -> bool:
+    """Início e fim do período do PDF batem com o período declarado no
+    Lattes dentro de uma folga pequena (default ±1 mês) nas duas pontas."""
+    if periodo_pdf is None or periodo_grupo is None:
+        return False
+    ini_pdf, fim_pdf = periodo_pdf
+    ini_grp, fim_grp = periodo_grupo
+    return (abs((ini_pdf - ini_grp).days) <= tolerancia_dias
+            and abs((fim_pdf - fim_grp).days) <= tolerancia_dias)
+
+
 def _verificar_atuacao_instituicao(grupo: dict, texto_pdf: str, nome_pesquisador: str) -> dict:
     """Como verificar_atuacao(), mas só confirma nome do pesquisador +
     instituição/sigla — sem checar cargo nem período de um vínculo
@@ -1353,7 +1292,22 @@ def _verificar_atuacao_instituicao(grupo: dict, texto_pdf: str, nome_pesquisador
     todo (o PDF pode cobrir várias promoções/cargos de uma vez, cada uma
     com seu próprio cargo — checar cargo de UM vínculo contra o PDF
     inteiro não faz sentido nesse nível); o período/meses creditados vêm
-    de _periodo_do_pdf, não daqui."""
+    de _periodo_do_pdf, não daqui — aqui ele só entra como sinal de apoio
+    (ver caminho combinado abaixo).
+
+    Comprovante de vínculo (carteira de trabalho/eSocial) costuma trazer a
+    razão social/CNPJ do empregador, que pode não ter nada a ver com o
+    nome de unidade/filial cadastrado no Lattes (ex.: Lattes = "ACM
+    Restinga", comprovante = "Associação Cristã de Moços do Rio Grande do
+    Sul", sem menção à unidade). Nesses casos o nome sozinho nunca bate no
+    limiar rígido — mas se já existe alguma palavra distintiva real em
+    comum (sim_inst acima de um piso bem mais baixo) E as datas do período
+    batem de forma apertada com o que o Lattes declarou, isso é evidência
+    combinada suficiente. Sim_inst=0% (nenhuma palavra em comum) NUNCA
+    passa por aqui, por mais que a data bata: data sozinha não prova nada,
+    porque tanto ela quanto o PDF anexado são escolhidos pelo próprio
+    candidato — o nome da instituição no texto é o único sinal difícil de
+    forjar que esse verificador tem."""
     texto_norm = normalizar(texto_pdf)
     partes    = normalizar(nome_pesquisador).split()
     sobrenome = partes[-1] if partes else ""
@@ -1362,10 +1316,17 @@ def _verificar_atuacao_instituicao(grupo: dict, texto_pdf: str, nome_pesquisador
     sim_inst = similaridade_instituicao(grupo["instituicao"], texto_pdf)
     sigla    = grupo.get("sigla", "")
     sigla_ok = len(sigla) > 3 and normalizar(sigla) in texto_norm
-    inst_ok  = sim_inst >= LIMIAR_INSTITUICAO or sigla_ok
+
+    datas_ok = False
+    if LIMIAR_INSTITUICAO_DATA_APERTADA <= sim_inst < LIMIAR_INSTITUICAO:
+        datas_ok = _datas_proximas(_periodo_do_pdf(texto_pdf, nome_pesquisador),
+                                    _intervalo_grupo(grupo))
+
+    inst_ok = sim_inst >= LIMIAR_INSTITUICAO or sigla_ok or datas_ok
 
     aprovado   = nome_ok and inst_ok
-    inst_label = f"{sim_inst:.0%}" + (" (sigla ✓)" if sigla_ok else "")
+    inst_label = (f"{sim_inst:.0%}" + (" (sigla ✓)" if sigla_ok else "")
+                                     + (" (data ✓)" if datas_ok else ""))
     detalhes   = f"Nome: {'✓' if nome_ok else '✗'} | Inst.: {inst_label}"
     score      = max(sim_inst, 1.0 if sigla_ok else 0.0)
     return {"aprovado": aprovado, "detalhes": detalhes, "score": score}
@@ -1623,9 +1584,6 @@ def calcular_pontos_item(item: dict, tipo: str,
         tabela = c.get("banca", {})
         return tabela.get(sub, tabela.get("Graduacao", 0)), sub
 
-    if tipo == "banca_especializacao_manual":
-        return c.get("banca", {}).get("Especializacao", 0), "Especializacao"
-
     if tipo in ("projeto_pesquisa", "projeto_extensao"):
         # Nem todo edital distingue coordenador de integrante nessas duas
         # categorias (o Anexo II atual não distingue — uma taxa única por
@@ -1640,15 +1598,8 @@ def calcular_pontos_item(item: dict, tipo: str,
         meses  = item.get("meses", 0)
         return taxa * meses, f"{papel.capitalize()} ({meses}m)"
 
-    if tipo in ("organizacao_evento", "ic_manual"):
+    if tipo == "organizacao_evento":
         return c.get(tipo, {}).get("unidade", 0), "Por unidade"
-
-    if tipo == "prod_artistica_int":
-        return c.get("prod_artistica_int", {}).get("unidade", 0), "Internacional"
-    if tipo == "prod_artistica_nac":
-        return c.get("prod_artistica_nac", {}).get("unidade", 0), "Nacional"
-    if tipo == "prod_artistica_reg":
-        return c.get("prod_artistica_reg", {}).get("unidade", 0), "Regional/Local"
 
     return 0, "—"
 
@@ -1661,11 +1612,6 @@ PASTA_POR_CRITERIO = {
     "7": "7_bancas",                                   "8": "8_atuacao",
     "9": "9_projetos_pesquisa",  "10": "10_projetos_extensao",
     "13": "13_organizacao_evento",
-    "14": "14_iniciacao_cientifica",
-    "15": "15_banca_especializacao",
-    "16": "16_prod_artistica_internacional",
-    "17": "17_prod_artistica_nacional",
-    "18": "18_prod_artistica_regional",
 }
 
 
@@ -2287,10 +2233,6 @@ def gerar_relatorio(resultados: list[dict], nome_pesquisador: str,
         "10": "10. Projetos de pesquisa",
         "11": "11. Projetos de extensão",
         "13": "13. Organização de evento",
-        "14": "14. Iniciação Científica (participação)",
-        "16": "16. Produção Artística/Cultural — Internacional",
-        "17": "17. Produção Artística/Cultural — Nacional",
-        "18": "18. Produção Artística/Cultural — Regional/Local",
     }
     secao_atual, row = "", 4
 
@@ -2686,89 +2628,6 @@ def verificar_curriculo(pasta_curriculo: str | Path,
             simbolo = "✓" if r["status"] == "APROVADO" else "✗"
             print(f"  [{simbolo}] {r['pdf_nome']} → {r['seq']} — {r['titulo'][:50]}...")
         resultados.extend(res_secao)
-
-    # Iniciação Científica — comprovação por PDF (sem XML)
-    ic_items = extrair_ic_manual(pasta)
-    if ic_items:
-        print(f"\nSeção 14: {len(ic_items)} item(s)")
-        campos_ic = _resolver_campos(campos_config.get("ic_manual"), "unidade")
-        for item in ic_items:
-            pdf_path = item["_pdf_path"]
-            pontos_item, sub_item = calcular_pontos_item(item, "ic_manual", criterios, qualis)
-            texto = extrair_texto_pdf(pdf_path)
-            if texto.startswith("__ERRO_PDF__"):
-                status, detalhes, pdf_nome = "ERRO PDF", texto, pdf_path.name
-                pontos_item = 0
-            else:
-                res    = verificar_por_config(item, texto, campos_ic, nome)
-                status = "APROVADO" if res["aprovado"] else "REPROVADO"
-                detalhes, pdf_nome = res["detalhes"], pdf_path.name
-            simbolo = "✓" if status == "APROVADO" else "✗"
-            print(f"  [{simbolo}] {item['seq']} — Iniciação Científica")
-            resultados.append({
-                "seq":          item["seq"],
-                "titulo":       item["titulo"],
-                "complemento":  "",
-                "ano":          "",
-                "status":       status,
-                "detalhes":     detalhes,
-                "pdf_nome":     pdf_nome,
-                "pontos":       pontos_item,
-                "subcategoria": sub_item,
-            })
-
-    # Banca de especialização — comprovação por PDF (sem XML, mesmo padrão da IC)
-    banca_esp_items = extrair_banca_especializacao_manual(pasta)
-    if banca_esp_items:
-        print(f"\nSeção 15: {len(banca_esp_items)} item(s)")
-        campos_banca_esp = _resolver_campos(campos_config.get("banca"), "Especializacao")
-        for item in banca_esp_items:
-            pdf_path = item["_pdf_path"]
-            pontos_item, sub_item = calcular_pontos_item(
-                item, "banca_especializacao_manual", criterios, qualis)
-            texto = extrair_texto_pdf(pdf_path)
-            if texto.startswith("__ERRO_PDF__"):
-                status, detalhes, pdf_nome = "ERRO PDF", texto, pdf_path.name
-                pontos_item = 0
-            else:
-                res    = verificar_por_config(item, texto, campos_banca_esp, nome)
-                status = "APROVADO" if res["aprovado"] else "REPROVADO"
-                detalhes, pdf_nome = res["detalhes"], pdf_path.name
-            simbolo = "✓" if status == "APROVADO" else "✗"
-            print(f"  [{simbolo}] {item['seq']} — Banca de Especialização")
-            resultados.append({
-                "seq":          item["seq"],
-                "titulo":       item["titulo"],
-                "complemento":  "",
-                "ano":          "",
-                "status":       status,
-                "detalhes":     detalhes,
-                "pdf_nome":     pdf_nome,
-                "pontos":       pontos_item,
-                "subcategoria": sub_item,
-            })
-
-    # Produção Artística/Cultural — extrai do XML e verifica título no PDF
-    prod_art_int, prod_art_nac, prod_art_reg = extrair_prod_artistica_xml(root)
-    for tipo_art, lista_art, label_art in [
-        ("prod_artistica_int", prod_art_int, "Internacional"),
-        ("prod_artistica_nac", prod_art_nac, "Nacional"),
-        ("prod_artistica_reg", prod_art_reg, "Regional/Local"),
-    ]:
-        if not lista_art:
-            continue
-        secao_num = lista_art[0]["seq"].split(".")[0]
-        print(f"\nSeção {secao_num} (Prod. Artística — {label_art}): {len(lista_art)} item(s)")
-        campos_art = campos_config.get(tipo_art, {})
-        pool_art   = _pool_pdfs_secao(pasta, secao_num)
-        if not pool_art:
-            continue
-        res_art = _processar_secao_por_pdf(
-            lista_art, pool_art, "tipo_arte", tipo_art, campos_art, nome, criterios, qualis)
-        for r in res_art:
-            simbolo = "✓" if r["status"] == "APROVADO" else "✗"
-            print(f"  [{simbolo}] {r['pdf_nome']} → {r['seq']} — {r['titulo'][:50]}...")
-        resultados.extend(res_art)
 
     # Projetos de pesquisa e extensão
     proj_pesquisa, proj_extensao = extrair_projetos(root, nome)
