@@ -48,6 +48,22 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
+# reportlab é opcional: usado só pra gerar o PDF de apoio à revisão manual
+# (currículo Lattes completo em formato legível — ver gerar_pdf_lattes).
+# Sem ele, o verificador continua funcionando normalmente, só pula essa
+# etapa com um aviso — não é crítico pro fluxo de pontuação em si.
+try:
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.units import cm
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.enums import TA_LEFT
+    from reportlab.platypus import (
+        SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, KeepTogether,
+    )
+    _HAS_REPORTLAB = True
+except ImportError:
+    _HAS_REPORTLAB = False
+
 
 # ── Caminhos padrão dos arquivos de apoio ─────────────────────────────────────
 
@@ -827,6 +843,46 @@ def extrair_organizacoes_evento(root: ET.Element) -> list[dict]:
             "ano":    db.get("ANO", "")                     if db is not None else "",
             "evento": det.get("INSTITUICAO-PROMOTORA", "")  if det is not None else "",
         })
+    return items
+
+
+_NIVEL_FORMACAO_LABEL = {
+    "GRADUACAO":                  "Graduação",
+    "MESTRADO":                   "Mestrado",
+    "MESTRADO-PROFISSIONALIZANTE": "Mestrado Profissionalizante",
+    "DOUTORADO":                  "Doutorado",
+    "ESPECIALIZACAO":             "Especialização",
+    "APERFEICOAMENTO":            "Aperfeiçoamento",
+    "LIVRE-DOCENCIA":             "Livre-Docência",
+    "POS-DOUTORADO":              "Pós-Doutorado",
+}
+_STATUS_CURSO_LABEL = {
+    "CONCLUIDO":     "Concluído",
+    "EM_ANDAMENTO":  "Em andamento",
+    "INTERROMPIDO":  "Interrompido",
+    "TRANCADO":      "Trancado",
+}
+
+
+def extrair_formacao_academica(root: ET.Element) -> list[dict]:
+    """Não entra na pontuação (o edital não cobra comprovante de formação) —
+    só serve de contexto no PDF de apoio à revisão manual (gerar_pdf_lattes),
+    pra quem revisa manualmente ver rápido a trajetória acadêmica do
+    candidato sem abrir o XML."""
+    items = []
+    fa = root.find(".//DADOS-GERAIS/FORMACAO-ACADEMICA-TITULACAO")
+    if fa is None:
+        return items
+    for el in fa:
+        items.append({
+            "nivel":       _NIVEL_FORMACAO_LABEL.get(el.tag, el.tag.replace("-", " ").title()),
+            "curso":       el.get("NOME-CURSO", ""),
+            "instituicao": el.get("NOME-INSTITUICAO", ""),
+            "status":      _STATUS_CURSO_LABEL.get(el.get("STATUS-DO-CURSO", ""), el.get("STATUS-DO-CURSO", "")),
+            "ano_inicio":  el.get("ANO-DE-INICIO", ""),
+            "ano_fim":     el.get("ANO-DE-CONCLUSAO", ""),
+        })
+    items.sort(key=lambda x: x["ano_inicio"] or "0")
     return items
 
 
@@ -1978,6 +2034,27 @@ def _processar_secao_por_pdf(
                     "tipo_pontos":  tipo_pontos,
                     "meses":        item_extra.get("meses"),
                 })
+        elif not items:
+            # PDF existe na pasta do candidato, mas a seção inteira não tem
+            # NENHUM item cadastrado no Lattes pra comparar — diferente do
+            # REPROVADO abaixo (que pressupõe pelo menos um item candidato
+            # que não bateu bem o suficiente). Status próprio pra deixar
+            # isso explícito na revisão manual: aqui não é "documento não
+            # corresponde ao que foi declarado", é "nada foi declarado".
+            resultados.append({
+                "seq":          pdf.stem,
+                "titulo":       "Sem item correspondente no Lattes",
+                "complemento":  "",
+                "ano":          "",
+                "status":       "SEM CADASTRO NO LATTES",
+                "detalhes":     ("Nenhum item desta seção está cadastrado no currículo Lattes — "
+                                 "o PDF existe na pasta do candidato, mas não há item declarado "
+                                 "para comparar e aprovar."),
+                "pdf_nome":     pdf.name,
+                "pontos":       0,
+                "subcategoria": "—",
+                "tipo_pontos":  tipo_pontos,
+            })
         else:
             # Diferencia "nada parecido o suficiente" de "o item mais
             # parecido foi para outro PDF que combinava ainda melhor com
@@ -2251,11 +2328,12 @@ def gerar_relatorio(resultados: list[dict], nome_pesquisador: str,
 
         status = res["status"]
         status_cor, bg_status = {
-            "APROVADO":  ("27500A", "EAF3DE"),
-            "REPROVADO": ("791F1F", "FCEBEB"),
-            "SEM PDF":   ("633806", "FAEEDA"),
-            "ERRO PDF":  ("444441", "F5F5F3"),
-            "SEM TEXTO": ("444441", "F5F5F3"),
+            "APROVADO":            ("27500A", "EAF3DE"),
+            "REPROVADO":           ("791F1F", "FCEBEB"),
+            "SEM PDF":             ("633806", "FAEEDA"),
+            "ERRO PDF":            ("444441", "F5F5F3"),
+            "SEM TEXTO":           ("444441", "F5F5F3"),
+            "SEM CADASTRO NO LATTES": ("633806", "FAEEDA"),
         }.get(status, ("444441", "F5F5F3"))
 
         try:
@@ -2560,6 +2638,220 @@ def gerar_ranking(ranking: list[dict], caminho_saida: Path):
     print(f"Ranking gerado: {caminho_saida}")
 
 
+# ── PDF do Lattes completo (apoio à revisão manual) ───────────────────────────
+#
+# O relatório Excel só lista o que o sistema conseguiu casar (ou tentar
+# casar) com um PDF comprovante — quem revisa manualmente um item com status
+# diferente de APROVADO precisa conferir contra o que o candidato de fato
+# declarou no Lattes, e o lattes.xml cru não é feito pra leitura humana (é
+# um .zip renomeado com um XML de uma linha só, ver _achar_lattes_xml).
+# gerar_pdf_lattes reaproveita os MESMOS extratores usados na pontuação —
+# não uma leitura à parte do XML — pra garantir que o que a pessoa vê no PDF
+# é exatamente o que o sistema também viu ao pontuar.
+
+def _fmt_data_lattes(valor: str) -> str:
+    """Converte 'DDMMAAAA' (formato de data do Lattes) pra 'DD/MM/AAAA'."""
+    if not valor or len(valor) != 8 or not valor.isdigit():
+        return valor or "—"
+    return f"{valor[0:2]}/{valor[2:4]}/{valor[4:8]}"
+
+
+def _pdf_esc(texto) -> str:
+    """Escapa texto pra uso dentro de reportlab.Paragraph (que interpreta um
+    mini-XML pra negrito/itálico) — sem isso, título com '&', '<' ou '>'
+    quebra a geração do PDF inteiro."""
+    if texto is None:
+        return "—"
+    texto = str(texto).strip()
+    if not texto:
+        return "—"
+    return texto.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _pdf_meta(*pares: tuple[str, str]) -> str:
+    """Junta pares (rótulo, valor) não vazios em uma linha 'Rótulo: valor • ...'."""
+    partes = [f"{rotulo}: {valor}" for rotulo, valor in pares if valor and str(valor).strip()]
+    return " &nbsp;•&nbsp; ".join(_pdf_esc(p) for p in partes)
+
+
+def _pdf_estilos():
+    base = getSampleStyleSheet()
+    estilos = {
+        "capa_titulo": ParagraphStyle(
+            "capa_titulo", parent=base["Title"], fontName="Helvetica-Bold",
+            fontSize=18, leading=22, spaceAfter=4, alignment=TA_LEFT),
+        "capa_sub": ParagraphStyle(
+            "capa_sub", parent=base["Normal"], fontName="Helvetica",
+            fontSize=9.5, leading=13, textColor="#555550", spaceAfter=2),
+        "secao": ParagraphStyle(
+            "secao", parent=base["Normal"], fontName="Helvetica-Bold",
+            fontSize=11.5, leading=16, textColor="#FFFFFF", backColor="#2E75B6",
+            spaceBefore=14, spaceAfter=8, leftIndent=6, borderPadding=(5, 4, 5, 4)),
+        "subsecao": ParagraphStyle(
+            "subsecao", parent=base["Normal"], fontName="Helvetica-Bold",
+            fontSize=10, leading=13, textColor="#1F4E79",
+            spaceBefore=8, spaceAfter=4),
+        "item_titulo": ParagraphStyle(
+            "item_titulo", parent=base["Normal"], fontName="Helvetica-Bold",
+            fontSize=9.5, leading=12.5, textColor="#2C2C2A", spaceAfter=1),
+        "item_meta": ParagraphStyle(
+            "item_meta", parent=base["Normal"], fontName="Helvetica",
+            fontSize=8.5, leading=11.5, textColor="#5A5A55", spaceAfter=7),
+        "vazio": ParagraphStyle(
+            "vazio", parent=base["Normal"], fontName="Helvetica-Oblique",
+            fontSize=9, leading=12, textColor="#8A8A85", spaceAfter=10),
+    }
+    return estilos
+
+
+def _pdf_secao(story, estilos, titulo, itens, renderizador) -> None:
+    """Adiciona uma seção ao PDF: cabeçalho colorido + um bloco por item
+    (título + linha de metadados), ou uma linha "nenhum item" se vazia —
+    igual à lista de seções do Excel, mas sem nunca "sumir" (ver
+    _pdf_secao é chamada mesmo pra seção vazia, propositalmente: reforça
+    pro revisor manual que a ausência no relatório é porque não há nada
+    cadastrado, não porque o PDF de apoio esqueceu de mostrar)."""
+    story.append(Paragraph(_pdf_esc(titulo), estilos["secao"]))
+    if not itens:
+        story.append(Paragraph("Nenhum item cadastrado nesta seção do Lattes.", estilos["vazio"]))
+        return
+    for item in itens:
+        bloco = renderizador(item)
+        story.append(KeepTogether(bloco) if len(bloco) > 1 else bloco[0])
+
+
+def gerar_pdf_lattes(root: ET.Element, nome: str, criterios: dict, caminho_saida: Path) -> None:
+    if not _HAS_REPORTLAB:
+        print("  [!] reportlab não instalado — pulei a geração do PDF do Lattes "
+              "(pip install reportlab).")
+        return
+
+    e = _pdf_estilos()
+    story: list = []
+
+    dg = root.find(".//DADOS-GERAIS")
+    nome_completo   = dg.get("NOME-COMPLETO", nome) if dg is not None else nome
+    nome_citacoes   = dg.get("NOME-EM-CITACOES-BIBLIOGRAFICAS", "") if dg is not None else ""
+    data_nascimento = _fmt_data_lattes(dg.get("DATA-NASCIMENTO", "")) if dg is not None else "—"
+    lattes_id       = root.get("NUMERO-IDENTIFICADOR", "—")
+    data_atualiz    = _fmt_data_lattes(root.get("DATA-ATUALIZACAO", ""))
+
+    story.append(Paragraph(f"Currículo Lattes — {_pdf_esc(nome_completo)}", e["capa_titulo"]))
+    story.append(Paragraph(_pdf_meta(
+        ("ID Lattes", lattes_id), ("Nome em citações", nome_citacoes),
+        ("Nascimento", data_nascimento)), e["capa_sub"]))
+    story.append(Paragraph(_pdf_meta(
+        ("Última atualização no Lattes", data_atualiz),
+        ("PDF gerado em", datetime.now().strftime("%d/%m/%Y %H:%M"))), e["capa_sub"]))
+    story.append(Spacer(1, 10))
+    story.append(Paragraph(
+        "Documento gerado automaticamente a partir do lattes.xml do candidato, pelos mesmos "
+        "extratores usados na pontuação — apoio à revisão manual de itens com status diferente "
+        "de APROVADO no relatório. Não substitui o currículo oficial da Plataforma Lattes.",
+        e["vazio"]))
+
+    # Formação acadêmica — contexto, não pontua.
+    formacao = extrair_formacao_academica(root)
+    _pdf_secao(story, e, "Formação Acadêmica", formacao, lambda it: [
+        Paragraph(f"<b>{_pdf_esc(it['nivel'])}</b> — {_pdf_esc(it['curso'])}", e["item_titulo"]),
+        Paragraph(_pdf_meta(("Instituição", it["instituicao"]), ("Situação", it["status"]),
+                             ("Período", f"{it['ano_inicio'] or '?'}–{it['ano_fim'] or 'atual'}")),
+                   e["item_meta"]),
+    ])
+
+    # Atuação profissional — todos os vínculos, independente de terem PDF.
+    pontos_atu   = criterios.get("atuacao", {}) if criterios else {}
+    atuacoes_xml = extrair_atuacao_profissional(root, pontos_atu)
+    _pdf_secao(story, e, "Seção 7/8/9 — Atuação Profissional", atuacoes_xml, lambda it: [
+        Paragraph(f"<b>{it['seq']}. {_pdf_esc(it['instituicao'])}</b>"
+                  + (f" ({_pdf_esc(it['instituicao_sigla'])})" if it.get("instituicao_sigla") else ""),
+                  e["item_titulo"]),
+        Paragraph(_pdf_meta(("Cargo/função", it["descricao"]),
+                             ("Categoria", LABEL_ATUACAO.get(it["categoria"], it["categoria"])),
+                             ("Período", it["periodo"]), ("Meses", it["meses"])),
+                   e["item_meta"]),
+    ])
+
+    # Produção bibliográfica.
+    artigos = extrair_artigos(root, nome)
+    _pdf_secao(story, e, "Seção 1 — Artigos Publicados em Periódicos", artigos, lambda it: [
+        Paragraph(f"<b>{it['seq']}. {_pdf_esc(it['titulo'])}</b>", e["item_titulo"]),
+        Paragraph(_pdf_meta(("Periódico", it.get("periodico")), ("ISSN", it.get("issn")),
+                             ("DOI", it.get("doi")), ("Ano", it.get("ano")),
+                             ("Autoria", it.get("autoria"))), e["item_meta"]),
+    ])
+
+    trabalhos_resumos = extrair_trabalhos_completos(root) + extrair_resumos(root)
+    trabalhos_resumos.sort(key=_numero_pdf_seq)
+    _pdf_secao(story, e, "Seção 2 — Trabalhos Completos e Resumos em Eventos", trabalhos_resumos, lambda it: [
+        Paragraph(f"<b>{it['seq']}. {_pdf_esc(it['titulo'])}</b>", e["item_titulo"]),
+        Paragraph(_pdf_meta(("Evento", it.get("evento")), ("Classificação", it.get("classificacao")),
+                             ("Ano", it.get("ano"))), e["item_meta"]),
+    ])
+
+    livros = extrair_livros(root)
+    _pdf_secao(story, e, "Seção 4 — Livros Publicados / Organizados", livros, lambda it: [
+        Paragraph(f"<b>{it['seq']}. {_pdf_esc(it['titulo'])}</b>", e["item_titulo"]),
+        Paragraph(_pdf_meta(("Tipo", it.get("tipo")), ("Editora", it.get("editora")),
+                             ("Cidade", it.get("cidade_editora")), ("ISBN", it.get("isbn")),
+                             ("Ano", it.get("ano"))), e["item_meta"]),
+    ])
+
+    capitulos = extrair_capitulos(root, nome)
+    _pdf_secao(story, e, "Seção 5 — Capítulos de Livro", capitulos, lambda it: [
+        Paragraph(f"<b>{it['seq']}. {_pdf_esc(it['titulo'])}</b>", e["item_titulo"]),
+        Paragraph(_pdf_meta(("Livro", it.get("livro")), ("Editora", it.get("editora")),
+                             ("ISBN", it.get("isbn")), ("Ano", it.get("ano")),
+                             ("Autoria", it.get("autoria"))), e["item_meta"]),
+    ])
+
+    bancas_orientacoes = extrair_bancas(root) + extrair_orientacoes(root)
+    bancas_orientacoes.sort(key=_numero_pdf_seq)
+    _pdf_secao(story, e, "Seção 6 — Bancas Examinadoras e Orientações Concluídas", bancas_orientacoes,
+               lambda it: [
+        Paragraph(f"<b>{it['seq']}. {_pdf_esc(it['titulo'])}</b>", e["item_titulo"]),
+        Paragraph(_pdf_meta(
+            ("Tipo", it.get("tipo") or it.get("natureza")),
+            ("Candidato/orientando", it.get("candidato") or it.get("orientando")),
+            ("Instituição", it.get("instituicao")), ("Ano", it.get("ano"))), e["item_meta"]),
+    ])
+
+    proj_pesquisa, proj_extensao = extrair_projetos(root, nome)
+    _pdf_secao(story, e, "Seção 10 — Projetos de Pesquisa", proj_pesquisa, lambda it: [
+        Paragraph(f"<b>{it['seq']}. {_pdf_esc(it['titulo'])}</b>", e["item_titulo"]),
+        Paragraph(_pdf_meta(("Papel", it.get("papel")), ("Situação", it.get("situacao")),
+                             ("Período", it.get("periodo"))), e["item_meta"]),
+    ])
+    _pdf_secao(story, e, "Seção 11 — Projetos de Extensão", proj_extensao, lambda it: [
+        Paragraph(f"<b>{it['seq']}. {_pdf_esc(it['titulo'])}</b>", e["item_titulo"]),
+        Paragraph(_pdf_meta(("Papel", it.get("papel")), ("Situação", it.get("situacao")),
+                             ("Período", it.get("periodo"))), e["item_meta"]),
+    ])
+
+    organizacoes = extrair_organizacoes_evento(root)
+    _pdf_secao(story, e, "Seção 13 — Organização de Evento Científico", organizacoes, lambda it: [
+        Paragraph(f"<b>{it['seq']}. {_pdf_esc(it['titulo'])}</b>", e["item_titulo"]),
+        Paragraph(_pdf_meta(("Evento/Instituição", it.get("evento")), ("Ano", it.get("ano"))),
+                   e["item_meta"]),
+    ])
+
+    doc = SimpleDocTemplate(
+        str(caminho_saida), pagesize=A4,
+        topMargin=1.8 * cm, bottomMargin=1.8 * cm, leftMargin=2 * cm, rightMargin=2 * cm,
+        title=f"Currículo Lattes — {nome_completo}",
+    )
+    doc.build(story)
+
+
+def _numero_pdf_seq(item: dict) -> tuple[int, ...]:
+    """Ordena itens pelo 'seq' (ex.: '2.3' → (2, 3)) — mesma lógica de
+    _numero_pdf, mas a partir de um dict de item em vez de um Path."""
+    try:
+        return tuple(int(p) for p in item["seq"].split("."))
+    except (KeyError, ValueError):
+        return (9999,)
+
+
 # ── Orquestrador principal ────────────────────────────────────────────────────
 
 def verificar_curriculo(pasta_curriculo: str | Path,
@@ -2589,19 +2881,19 @@ def verificar_curriculo(pasta_curriculo: str | Path,
     print(f"{'='*60}")
 
     extratores = [
-        (extrair_artigos,             "periodico",    "artigo"),
-        (extrair_trabalhos_completos, "evento",       "trabalho_completo"),
-        (extrair_resumos,             "evento",       "resumo"),
-        (extrair_livros,              "editora",      "livro_publicado"),
-        (extrair_capitulos,           "livro",        "capitulo"),
-        (extrair_orientacoes,         "orientando",   "orientacao_mestrado"),
-        (extrair_bancas,              "candidato",    "banca"),
-        (extrair_organizacoes_evento, "evento",       "organizacao_evento"),
+        (extrair_artigos,             "periodico",    "artigo",              "1"),
+        (extrair_trabalhos_completos, "evento",       "trabalho_completo",   "2"),
+        (extrair_resumos,             "evento",       "resumo",              "2"),
+        (extrair_livros,              "editora",      "livro_publicado",     "4"),
+        (extrair_capitulos,           "livro",        "capitulo",            "5"),
+        (extrair_orientacoes,         "orientando",   "orientacao_mestrado", "6"),
+        (extrair_bancas,              "candidato",    "banca",               "6"),
+        (extrair_organizacoes_evento, "evento",       "organizacao_evento",  "13"),
     ]
 
     resultados = []
 
-    for extrator, campo_compl, tipo_pontos in extratores:
+    for extrator, campo_compl, tipo_pontos, secao in extratores:
         # Categoria que a planilha de critérios atual não pontua (ex.:
         # orientação, nesse edital) nem vale buscar PDF pra ela — ganho
         # duplo: menos trabalho à toa, e evita colisão de numeração de
@@ -2613,12 +2905,14 @@ def verificar_curriculo(pasta_curriculo: str | Path,
         # extrair_artigos precisa do nome do pesquisador pra achar sua
         # própria ORDEM-DE-AUTORIA na lista de AUTORES (ver _ordem_autoria).
         items = extrator(root, nome) if tipo_pontos in ("artigo", "capitulo") else extrator(root)
-        if not items:
-            continue
-        secao  = items[0]["seq"].split(".")[0]
-        pool   = _pool_pdfs_secao(pasta, secao)
-        if not pool:
-            continue  # sem PDFs nesta seção → omite do relatório
+        pool  = _pool_pdfs_secao(pasta, secao)
+        if not items and not pool:
+            continue  # nada declarado no Lattes e nenhum PDF na pasta → nada a reportar
+        if items and not pool:
+            continue  # item(ns) declarado(s) mas sem PDF nesta seção → omite do relatório
+        # Daqui pra baixo sobra o caso "há PDF" — com ou sem item(ns) do
+        # Lattes pra casar (sem item nenhum, cada PDF vira uma linha "SEM
+        # CADASTRO NO LATTES" dentro de _processar_secao_por_pdf).
         campos_por_sub = campos_config.get(tipo_pontos, {})
         print(f"\nSeção {secao}: {len(pool)} PDF(s) / {len(items)} item(s) no Lattes")
 
@@ -2631,18 +2925,17 @@ def verificar_curriculo(pasta_curriculo: str | Path,
 
     # Projetos de pesquisa e extensão
     proj_pesquisa, proj_extensao = extrair_projetos(root, nome)
-    for tipo_proj, lista_proj in [
-        ("projeto_pesquisa", proj_pesquisa),
-        ("projeto_extensao", proj_extensao),
+    for tipo_proj, lista_proj, secao_num in [
+        ("projeto_pesquisa", proj_pesquisa, "10"),
+        ("projeto_extensao", proj_extensao, "11"),
     ]:
-        if not lista_proj:
-            continue
-        secao_num = lista_proj[0]["seq"].split(".")[0]
-        print(f"\nSeção {secao_num}: {len(lista_proj)} item(s)")
         campos_proj = campos_config.get(tipo_proj, {})
         pool_proj   = _pool_pdfs_secao(pasta, secao_num)
-        if not pool_proj:
-            continue
+        if not lista_proj and not pool_proj:
+            continue  # nada declarado no Lattes e nenhum PDF na pasta → nada a reportar
+        if lista_proj and not pool_proj:
+            continue  # item(ns) declarado(s) mas sem PDF nesta seção → omite do relatório
+        print(f"\nSeção {secao_num}: {len(pool_proj)} PDF(s) / {len(lista_proj)} item(s) no Lattes")
         res_proj = _processar_secao_por_pdf(
             lista_proj, pool_proj, "papel", tipo_proj, campos_proj, nome, criterios, qualis)
         for r in res_proj:
@@ -2755,8 +3048,22 @@ def verificar_curriculo(pasta_curriculo: str | Path,
     saida = destino_rel / f"relatorio_{nome_arquivo}.xlsx"
     gerar_relatorio(resultados, nome, saida, atuacoes=atuacoes, pasta_candidato=pasta)
 
+    # PDF do Lattes completo, legível — apoio à revisão manual dos itens que
+    # não saíram APROVADO (ver gerar_pdf_lattes). Envolvido em try/except:
+    # uma falha aqui (ex.: reportlab ausente, ou algum campo inesperado no
+    # XML de um candidato específico) não pode derrubar a pontuação em si,
+    # que já está pronta e salva nesse ponto.
+    saida_pdf = destino_rel / f"lattes_{nome_arquivo}.pdf"
+    try:
+        gerar_pdf_lattes(root, nome, criterios, saida_pdf)
+    except Exception as exc:
+        print(f"  [!] Falha ao gerar PDF do Lattes ({saida_pdf.name}): {exc}")
+        saida_pdf = None
+
     print(f"\n{'='*60}")
     print(f"Relatório: {saida}")
+    if saida_pdf is not None:
+        print(f"Lattes (PDF p/ revisão manual): {saida_pdf}")
     print(f"Pontos produção (aprovados): {pts_producao}")
     print(f"Pontos atuação  (aprovados): {pts_atuacao}")
     print(f"TOTAL: {total}")

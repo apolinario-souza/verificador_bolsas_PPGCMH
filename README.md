@@ -172,11 +172,12 @@ Essa comparação é só de **exibição/conferência manual** — não altera a
 | Status | Quando ocorre |
 |--------|---------------|
 | **APROVADO** | PDF casado com item do Lattes e passou na verificação de conteúdo (§4 ou, na Atuação Profissional, §5) |
-| **REPROVADO** | PDF não atingiu o score mínimo de correspondência com nenhum item do Lattes (ou, na Atuação Profissional, nenhum grupo/instituição passou nas condições de nome + instituição do §5) |
+| **REPROVADO** | Há pelo menos um item da seção cadastrado no Lattes, mas este PDF não atingiu o score mínimo de correspondência com nenhum deles (ou, na Atuação Profissional, nenhum grupo/instituição passou nas condições de nome + instituição do §5) |
+| **SEM CADASTRO NO LATTES** | O PDF existe na pasta do candidato, mas a seção inteira não tem **nenhum** item cadastrado no Lattes para comparar — diferente de REPROVADO, aqui não há sequer um candidato a comparação |
 | **ERRO PDF** | Falha ao abrir/ler o arquivo PDF |
 | **SEM TEXTO** | PDF abriu, mas não foi possível extrair texto (nem via OCR) |
 
-Somente itens **APROVADO** entram no somatório de pontos do candidato.
+Somente itens **APROVADO** entram no somatório de pontos do candidato. Se **nenhum** item de uma seção estiver cadastrado no Lattes **e** não houver PDF nenhum na pasta pra ela, a seção simplesmente não aparece no relatório (nada a reportar); se há item(ns) cadastrado(s) mas nenhum PDF na pasta, idem — a omissão nesses dois casos é silenciosa por design (ver `verificar_curriculo()`).
 
 ---
 
@@ -203,3 +204,13 @@ Somente itens **APROVADO** entram no somatório de pontos do candidato.
 - PDF com score "quase bateu" (§3.2) é relido com mais páginas antes de ser dado como reprovado — o retry só acontece nesse caso, não em todo PDF.
 - Extração de período de vínculo empregatício reconhece o formato específico da Carteira de Trabalho Digital/eSocial ("Contratos de trabalho") com prioridade máxima sobre os padrões genéricos de data (§5.1).
 - Na Atuação Profissional, **data batendo nunca aprova sozinha** — o caminho combinado do §5 exige, além da data apertada, que o nome da instituição já tenha pelo menos 40% de similaridade (uma palavra distintiva real em comum). Isso é deliberado: tanto a data declarada no Lattes quanto o PDF anexado são escolhidos pelo próprio candidato, então "data bate" isoladamente não é evidência confiável — só o nome da instituição no texto do comprovante é difícil de forjar.
+
+---
+
+## 10. PDF do Lattes completo (apoio à revisão manual)
+
+Além do `relatorio_<Nome>.xlsx`, o sistema gera `lattes_<Nome>.pdf` na mesma pasta do candidato (`gerar_pdf_lattes()`) — uma versão legível do currículo Lattes, pensada pra quem revisa manualmente um item com status diferente de **APROVADO**: o `lattes.xml` original não é feito pra leitura humana (é um `.zip` renomeado com um XML de uma linha só, ver §1) e abri-lo direto não é prático.
+
+- Reaproveita os **mesmos extratores** usados na pontuação (`extrair_artigos`, `extrair_projetos`, `extrair_atuacao_profissional` etc.) — o que aparece no PDF é exatamente o que o sistema também viu ao pontuar, não uma leitura à parte do XML.
+- Lista Dados Gerais, Formação Acadêmica (contexto — não pontua) e todas as seções pontuáveis (1, 2, 4, 5, 6, 7/8/9, 10, 11, 13), cada uma com seu próprio cabeçalho — inclusive as vazias, mostrando "Nenhum item cadastrado nesta seção do Lattes" em vez de simplesmente omitir a seção, pra deixar explícito quando o motivo de um PDF ficar **SEM CADASTRO NO LATTES** é a ausência total de itens declarados naquela seção.
+- Depende do pacote `reportlab` (`pip install reportlab`); se não estiver instalado, a geração do PDF é pulada com um aviso no console — não interrompe a pontuação do candidato, que já está pronta e salva nesse ponto.
